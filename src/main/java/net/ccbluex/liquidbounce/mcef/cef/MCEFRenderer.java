@@ -147,10 +147,14 @@ public class MCEFRenderer implements Closeable {
     // ------------------------------------------------------------------------------------------
 
     protected void onAcceleratedPaint(CefAcceleratedPaintInfo info, int width, int height) {
-        switch (info) {
-            case CefAcceleratedPaintInfoWin winInfo -> onAcceleratedPaintWindows(winInfo, width, height);
-            case CefAcceleratedPaintInfoLinux linuxInfo -> onAcceleratedPaintLinux(linuxInfo, width, height);
-            default -> MCEF.INSTANCE.LOGGER.warn("Unsupported CefAcceleratedPaintInfo type: {}", info.getClass().getName());
+        // if/instanceof rather than a type switch, to keep this compilable at Java 17 (the floor for
+        // MC 1.20.1) so one build serves every version.
+        if (info instanceof CefAcceleratedPaintInfoWin winInfo) {
+            onAcceleratedPaintWindows(winInfo, width, height);
+        } else if (info instanceof CefAcceleratedPaintInfoLinux linuxInfo) {
+            onAcceleratedPaintLinux(linuxInfo, width, height);
+        } else {
+            MCEF.INSTANCE.LOGGER.warn("Unsupported CefAcceleratedPaintInfo type: {}", info.getClass().getName());
         }
     }
 
