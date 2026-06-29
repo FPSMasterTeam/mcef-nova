@@ -1,0 +1,122 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'idea'
+}
+
+// java-cef is vendored under java-cef/ (only the java/ bindings are needed; natives are downloaded
+// at runtime). The commit hash that pins the matching native build is declared in gradle.properties
+// and written into the jar so the download manager fetches the right binaries.
+def jcefCommit = project.jcef_commit
+
+tasks.register('generateJcefCommitFile') {
+    doLast {
+        if (jcefCommit == null || jcefCommit.isEmpty()) {
+            throw new GradleException("jcef_commit is not set in gradle.properties.")
+        }
+        file("$buildDir/jcef.commit").text = jcefCommit
+    }
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    mavenCentral()
+    mavenLocal()
+}
+
+def lwjglVersion = project.lwjgl_version
+
+sourceSets {
+    jcef {
+        java {
+            srcDir "java-cef/java"
+            exclude "**/tests/**"
+        }
+    }
+
+    main {
+        compileClasspath += jcef.output
+        runtimeClasspath += jcef.output
+    }
+}
+
+dependencies {
+    // Runtime-provided by Minecraft's own LWJGL / SLF4J. compileOnly so we never bundle or pin them.
+    compileOnly "org.lwjgl:lwjgl:${lwjglVersion}"
+    compileOnly "org.lwjgl:lwjgl-opengl:${lwjglVersion}"
+    compileOnly "org.lwjgl:lwjgl-glfw:${lwjglVersion}"
+    compileOnly "org.lwjgl:lwjgl-egl:${lwjglVersion}"
+    compileOnly "org.slf4j:slf4j-api:2.0.16"
+    compileOnly "org.jspecify:jspecify:1.0.0"
+
+    // Provided by Minecraft's runtime classpath (MC bundles all of these). compileOnly so the
+    // library neither bundles nor pins them; the host game supplies them at runtime.
+    compileOnly "com.google.guava:guava:33.3.1-jre"
+    compileOnly "commons-codec:commons-codec:1.17.1"
+    compileOnly "commons-io:commons-io:2.16.1"
+    compileOnly "org.apache.commons:commons-compress:1.27.1"
+
+    // Genuinely ours: HTTP for the native CEF download manager. Exposed so consumers bundle it.
+    api "com.squareup.okhttp3:okhttp:4.12.0"
+
+    // The jcef sourceSet also needs the LWJGL types on its compile classpath.
+    jcefCompileOnly "org.lwjgl:lwjgl:${lwjglVersion}"
+    jcefCompileOnly "org.lwjgl:lwjgl-opengl:${lwjglVersion}"
+}
+
+processResources {
+    dependsOn generateJcefCommitFile
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = 'UTF-8'
+}
+
+jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    manifest {
+        attributes(['Specification-Title'     : archives_base_name,
+                    'Specification-Vendor'    : group,
+                    'Specification-Version'   : "1",
+                    'Implementation-Title'    : archives_base_name,
+                    'Implementation-Version'  : mod_version,
+                    'Implementation-Vendor'   : group,
+                    'java-cef-commit'         : jcefCommit
+        ])
+    }
+    from sourceSets.jcef.output.classesDirs
+    from sourceSets.jcef.output.resourcesDir
+    from("LICENSE") {
+        rename { "${it}_${project.base.archivesName.get()}" }
+    }
+    from("$buildDir/jcef.commit")
+    from sourceSets.jcef.output
+}
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+idea {
+    module {
+        excludeDirs += file("java-cef/java/tests")
+        inheritOutputDirs true
+    }
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) {
+            from components.java
+        }
+    }
+}
