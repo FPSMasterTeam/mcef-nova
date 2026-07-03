@@ -32,14 +32,29 @@ public class MCEFGlfwCursorHelper {
     private static final Map<CefCursorType, Long> CEF_TO_GLFW_CURSORS = new EnumMap<>(CefCursorType.class);
 
     /**
-     * Helper method to get a GLFW cursor handle for the given {@link CefCursorType} cursor type
+     * Helper method to get a GLFW cursor handle for the given {@link CefCursorType} cursor type.
+     * <p>
+     * Many {@link CefCursorType} values have no GLFW standard-cursor equivalent and carry a
+     * {@code glfwId} of {@code 0} (e.g. WAIT, HELP, CELL, GRAB...), and some map to shapes that a
+     * given GLFW build may not support. Calling {@link GLFW#glfwCreateStandardCursor} with such a
+     * shape makes GLFW spam {@code Invalid standard cursor 0x...} errors on every cursor change.
+     * <p>
+     * In those cases we fall back to the {@code NULL} (0) handle, which {@link GLFW#glfwSetCursor}
+     * interprets as the default arrow cursor. The fallback (like every other result) is cached, so
+     * we never re-attempt creation or re-log the error for a given cursor type.
      */
     public static long getGLFWCursorHandle(CefCursorType cursorType) {
         if (CEF_TO_GLFW_CURSORS.containsKey(cursorType)) {
             return CEF_TO_GLFW_CURSORS.get(cursorType);
         }
 
-        var glfwCursorHandle = GLFW.glfwCreateStandardCursor(cursorType.glfwId);
+        long glfwCursorHandle = 0L;
+        if (cursorType.glfwId != 0) {
+            // Returns 0 (NULL) if GLFW doesn't support this standard-cursor shape; we cache that
+            // 0 the same way, so glfwSetCursor falls back to the default arrow.
+            glfwCursorHandle = GLFW.glfwCreateStandardCursor(cursorType.glfwId);
+        }
+
         CEF_TO_GLFW_CURSORS.put(cursorType, glfwCursorHandle);
         return glfwCursorHandle;
     }

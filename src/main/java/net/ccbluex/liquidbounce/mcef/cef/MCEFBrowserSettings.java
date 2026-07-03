@@ -27,6 +27,18 @@ public class MCEFBrowserSettings extends CefBrowserSettings {
     public MCEFBrowserSettings(int frameRate, boolean sharedTextureEnabled) {
         super();
         this.windowless_frame_rate = frameRate;
-        this.shared_texture_enabled = sharedTextureEnabled;
+        // Zero-copy GPU acceleration (shared_texture_enabled) delivers frames via
+        // onAcceleratedPaint, whose shared_texture_handle is only valid FOR THE DURATION OF THE
+        // CALLBACK. On Windows/Linux the callback now runs on the dedicated CEF message-loop
+        // thread (CefMessageLoopThread), which has no GL context — so the handle would have to be
+        // imported on the render thread later, by which point CEF has already recycled it. That
+        // stale import fails every frame (glImportMemoryWin32HandleEXT -> GL_OUT_OF_MEMORY on
+        // Windows / eglCreateImageKHR on Linux) and the browser renders black.
+        //
+        // Fall back to the CPU onPaint path there: MCEFBrowser copies the pixels into a CPU mirror
+        // during the callback and the render thread uploads them — no cross-thread handle lifetime
+        // problem. macOS keeps zero-copy (it has no message-loop thread; CEF is pumped on the
+        // render thread, so onAcceleratedPaint imports synchronously with a live handle).
+        this.shared_texture_enabled = sharedTextureEnabled && CefHelper.getMessageLoopThread() == null;
     }
 }
