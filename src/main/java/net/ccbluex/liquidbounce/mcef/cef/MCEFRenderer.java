@@ -146,15 +146,24 @@ public class MCEFRenderer implements Closeable {
     // Accelerated paint (GPU shared texture import). Platform-specific, Minecraft-version-agnostic.
     // ------------------------------------------------------------------------------------------
 
-    protected void onAcceleratedPaint(CefAcceleratedPaintInfo info, int width, int height) {
+    /**
+     * Import CEF's shared texture into a FRESH OpenGL texture and return its id (0 on failure).
+     *
+     * <p>Unlike the legacy path, this does NOT delete any previous texture or store the id — the
+     * caller ({@link MCEFBrowser}) owns the cross-thread texture lifecycle (the imported texture is
+     * handed to the render thread behind a GL fence and freed once no longer displayed). Must run on
+     * a thread with a current GL context whose object space is shared with the render thread.
+     */
+    protected int importAcceleratedTexture(CefAcceleratedPaintInfo info, int width, int height) {
         // if/instanceof rather than a type switch, to keep this compilable at Java 17 (the floor for
         // MC 1.20.1) so one build serves every version.
         if (info instanceof CefAcceleratedPaintInfoWin winInfo) {
-            onAcceleratedPaintWindows(winInfo, width, height);
+            return importAcceleratedWindows(winInfo, width, height);
         } else if (info instanceof CefAcceleratedPaintInfoLinux linuxInfo) {
-            onAcceleratedPaintLinux(linuxInfo, width, height);
+            return importAcceleratedLinux(linuxInfo, width, height);
         } else {
             MCEF.INSTANCE.LOGGER.warn("Unsupported CefAcceleratedPaintInfo type: {}", info.getClass().getName());
+            return 0;
         }
     }
 
@@ -162,14 +171,10 @@ public class MCEFRenderer implements Closeable {
      * Windows: CEF provides a D3D11 texture handle; import it into a fresh OpenGL texture via
      * {@code glImportMemoryWin32HandleEXT}.
      */
-    private void onAcceleratedPaintWindows(CefAcceleratedPaintInfoWin info, int width, int height) {
+    private int importAcceleratedWindows(CefAcceleratedPaintInfoWin info, int width, int height) {
         if (info.shared_texture_handle == 0) {
             MCEF.INSTANCE.LOGGER.warn("Accelerated paint shared texture handle is invalid.");
-            return;
-        }
-
-        if (transparent) {
-            glEnable(GL_BLEND);
+            return 0;
         }
 
         // Textures imported from external memory are immutable, so allocate a new one each frame.
@@ -179,7 +184,7 @@ public class MCEFRenderer implements Closeable {
         if (memoryObject == 0) {
             MCEF.INSTANCE.LOGGER.error("Failed to create memory object for shared texture.");
             glDeleteTextures(newTextureId);
-            return;
+            return 0;
         }
 
         // CEF emits CEF_COLOR_TYPE_BGRA_8888: 4 bytes per pixel; the mem object size requires x2.
@@ -196,7 +201,7 @@ public class MCEFRenderer implements Closeable {
             MCEF.INSTANCE.LOGGER.error("glImportMemoryWin32HandleEXT failed with error: {}", error);
             glDeleteTextures(newTextureId);
             glDeleteMemoryObjectsEXT(memoryObject);
-            return;
+            return 0;
         }
 
         glBindTexture(GL_TEXTURE_2D, newTextureId);
@@ -209,40 +214,38 @@ public class MCEFRenderer implements Closeable {
                 memoryObject,
                 0
         );
-        glFinish();
 
-        deleteTexture(sharedTextureId);
+        // The texture keeps its own reference to the imported storage, so the memory object can go now.
         glDeleteMemoryObjectsEXT(memoryObject);
 
-        sharedTextureId = newTextureId;
         textureWidth = width;
         textureHeight = height;
-
         isAccelerated = true;
         unpainted = false;
         isBGRA = true;
 
         glBindTexture(GL_TEXTURE_2D, 0);
+        return newTextureId;
     }
 
     /**
      * Linux: CEF provides dmabuf planes; import them via EGL into a fresh OpenGL texture.
      */
-    private void onAcceleratedPaintLinux(CefAcceleratedPaintInfoLinux info, int width, int height) {
+    private int importAcceleratedLinux(CefAcceleratedPaintInfoLinux info, int width, int height) {
         if (!info.hasDmaBufPlanes()) {
             MCEF.INSTANCE.LOGGER.warn("Accelerated paint info has no dmabuf planes on Linux.");
-            return;
+            return 0;
         }
 
         var display = EglUtils.getDisplay();
         if (display == EGL14.EGL_NO_DISPLAY) {
             MCEF.INSTANCE.LOGGER.error("EGL display is not available for dmabuf import.");
-            return;
+            return 0;
         }
 
         if (EGL14.eglGetCurrentContext() == EGL14.EGL_NO_CONTEXT) {
             MCEF.INSTANCE.LOGGER.warn("No current EGL context available for dmabuf import.");
-            return;
+            return 0;
         }
 
         var drmFormat = switch (info.format) {
@@ -253,7 +256,7 @@ public class MCEFRenderer implements Closeable {
 
         if (drmFormat == 0) {
             MCEF.INSTANCE.LOGGER.error("Unsupported accelerated paint format: {}", info.format);
-            return;
+            return 0;
         }
 
         var planeCount = Math.min(info.plane_count, CefConstants.DMA_BUF_PLANE_FD_ATTRS.length);
@@ -262,7 +265,7 @@ public class MCEFRenderer implements Closeable {
         planeCount = Math.min(planeCount, info.plane_offsets.length);
         if (planeCount <= 0) {
             MCEF.INSTANCE.LOGGER.warn("No dmabuf planes available for accelerated paint.");
-            return;
+            return 0;
         }
 
         var eglCapabilities = EglUtils.getCapabilities();
@@ -282,7 +285,7 @@ public class MCEFRenderer implements Closeable {
                 long offset = info.plane_offsets[i];
                 if (offset > Integer.MAX_VALUE) {
                     MCEF.INSTANCE.LOGGER.error("dmabuf plane offset too large for EGL attributes: {}", offset);
-                    return;
+                    return 0;
                 }
 
                 attribs.put(CefConstants.DMA_BUF_PLANE_FD_ATTRS[i]).put(info.plane_fds[i]);
@@ -314,11 +317,7 @@ public class MCEFRenderer implements Closeable {
                         "eglCreateImageKHR failed for dmabuf import. eglGetError=0x{}",
                         Integer.toHexString(eglError)
                 );
-                return;
-            }
-
-            if (transparent) {
-                glEnable(GL_BLEND);
+                return 0;
             }
 
             var newTextureId = glGenTextures();
@@ -330,20 +329,17 @@ public class MCEFRenderer implements Closeable {
             if (error != GL_NO_ERROR) {
                 MCEF.INSTANCE.LOGGER.error("glEGLImageTargetTexStorageEXT failed with error: {}", error);
                 glDeleteTextures(newTextureId);
-                return;
+                return 0;
             }
 
-            deleteTexture(sharedTextureId);
-
-            sharedTextureId = newTextureId;
             textureWidth = width;
             textureHeight = height;
-
             isAccelerated = true;
             unpainted = false;
             isBGRA = info.format != CefConstants.CEF_COLOR_TYPE_BGRA_8888;
 
             glBindTexture(GL_TEXTURE_2D, 0);
+            return newTextureId;
         }
     }
 

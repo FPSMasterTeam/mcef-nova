@@ -34,6 +34,7 @@ import org.cef.event.CefMouseWheelEvent;
 import org.cef.handler.CefAcceleratedPaintInfo;
 import org.cef.misc.CefCursorType;
 import org.lwjgl.glfw.GLFW;
+import org.lwjgl.opengl.GL32;
 import org.lwjgl.system.MemoryUtil;
 
 import java.awt.*;
@@ -93,9 +94,21 @@ public class MCEFBrowser extends CefBrowserOsr {
     private Rectangle frameDirty;
     private boolean frameSizeChanged = false;
     private boolean popupNeedsUpload = false;
-    private CefAcceleratedPaintInfo pendingAcceleratedInfo;
-    private int pendingAcceleratedWidth = 0, pendingAcceleratedHeight = 0;
     private String lastDroppedPaintSignature;
+
+    // Zero-copy accelerated paint handoff (Windows/Linux). CEF's shared texture is imported into a GL
+    // texture ON THE CEF THREAD inside onAcceleratedPaint (MCEFGlContext bound there), while the handle
+    // is still valid, then handed to the render thread behind a GL fence. readyAccel* are produced by
+    // the CEF thread and consumed by the render thread (guarded by paintLock); displayedAccel* are
+    // render-thread-owned (what Nova samples). See onAcceleratedPaint / flushFrame.
+    private int readyAccelTexId = 0;
+    private long readyAccelFence = 0L;
+    private int readyAccelWidth = 0, readyAccelHeight = 0;
+    private int displayedAccelTexId = 0;
+    private int displayedAccelWidth = 0, displayedAccelHeight = 0;
+    private volatile boolean browserClosed = false;
+    // glClientWaitSync timeout: bound the render-thread wait so a lost fence can't wedge the frame.
+    private static final long ACCEL_FENCE_TIMEOUT_NS = 5_000_000L; // 5 ms
 
     private final boolean isMacOs = MCEFPlatform.getPlatform().isMacOS();
     private final boolean isWindows = MCEFPlatform.getPlatform().isWindows();
@@ -248,18 +261,81 @@ public class MCEFBrowser extends CefBrowserOsr {
             }
         }
 
-        if (!popup) {
-            // Defer the GL import to the render thread; only the newest frame matters.
-            synchronized (paintLock) {
-                pendingAcceleratedInfo = info;
-                pendingAcceleratedWidth = width;
-                pendingAcceleratedHeight = height;
-            }
-        } else {
+        if (popup) {
             MCEF.INSTANCE.LOGGER.warn("Accelerated paint for popups is not supported in MCEF.");
+            super.onAcceleratedPaint(browser, popup, dirtyRects, info);
+            return;
         }
 
+        // Import CEF's shared texture into a GL texture RIGHT HERE, on this (CEF message-loop) thread,
+        // while the handle is valid. Bind the shared GL context first (Win/Linux); on a platform with
+        // no message-loop thread this callback is already on the render thread with MC's context.
+        MCEFGlContext glContext = MCEFGlContext.get();
+        if (glContext != null && !glContext.ensureCurrentOnCefThread()) {
+            super.onAcceleratedPaint(browser, popup, dirtyRects, info);
+            return;
+        }
+        if (browserClosed) {
+            return;
+        }
+
+        int newTex = renderer.importAcceleratedTexture(info, width, height);
+        if (newTex == 0) {
+            super.onAcceleratedPaint(browser, popup, dirtyRects, info);
+            return;
+        }
+        // Fence so the render thread can order its sampling after this import completes on the GPU,
+        // then flush so the fence (and the import commands) are actually submitted to the driver.
+        long fence = GL32.glFenceSync(GL32.GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        glFlush();
+
+        int overwrittenTex;
+        long overwrittenFence;
+        synchronized (paintLock) {
+            if (browserClosed) {
+                overwrittenTex = newTex;
+                overwrittenFence = fence;
+            } else {
+                // A prior frame not yet picked up by the render thread is stale; recycle it here (the
+                // render thread never saw it, so deleting on this producer thread is safe).
+                overwrittenTex = readyAccelTexId;
+                overwrittenFence = readyAccelFence;
+                readyAccelTexId = newTex;
+                readyAccelFence = fence;
+                readyAccelWidth = width;
+                readyAccelHeight = height;
+            }
+        }
+        if (overwrittenFence != 0L) {
+            GL32.glDeleteSync(overwrittenFence);
+        }
+        if (overwrittenTex != 0) {
+            glDeleteTextures(overwrittenTex);
+        }
+
+        onAcceleratedFramePainted(width, height);
         super.onAcceleratedPaint(browser, popup, dirtyRects, info);
+    }
+
+    /**
+     * Hook fired (on the CEF thread) after an accelerated frame has been imported and handed off.
+     * Hosts override to signal their own paint bookkeeping. Default: nothing.
+     */
+    protected void onAcceleratedFramePainted(int width, int height) {
+        // no-op
+    }
+
+    /** The GL texture id the render thread should currently sample for the accelerated path, or 0. */
+    public final int getDisplayedAcceleratedTextureId() {
+        return displayedAccelTexId;
+    }
+
+    public final int getDisplayedAcceleratedWidth() {
+        return displayedAccelWidth;
+    }
+
+    public final int getDisplayedAcceleratedHeight() {
+        return displayedAccelHeight;
     }
 
     /**
@@ -267,16 +343,36 @@ public class MCEFBrowser extends CefBrowserOsr {
      * frame via {@link MCEF#update()}.
      */
     public final void flushFrame() {
-        CefAcceleratedPaintInfo acceleratedInfo;
-        int acceleratedWidth, acceleratedHeight;
+        // --- accelerated (zero-copy) handoff: adopt the newest imported texture, behind its fence ---
+        int newDisplay = 0;
+        long fence = 0L;
+        int newW = 0, newH = 0;
         synchronized (paintLock) {
-            acceleratedInfo = pendingAcceleratedInfo;
-            acceleratedWidth = pendingAcceleratedWidth;
-            acceleratedHeight = pendingAcceleratedHeight;
-            pendingAcceleratedInfo = null;
+            if (readyAccelTexId != 0) {
+                newDisplay = readyAccelTexId;
+                fence = readyAccelFence;
+                newW = readyAccelWidth;
+                newH = readyAccelHeight;
+                readyAccelTexId = 0;
+                readyAccelFence = 0L;
+            }
         }
-        if (acceleratedInfo != null) {
-            applyAcceleratedFrame(acceleratedInfo, acceleratedWidth, acceleratedHeight);
+        if (newDisplay != 0) {
+            if (fence != 0L) {
+                // Server-side ordering would suffice, but the import ran on another context: wait on
+                // the client side (bounded) so the texture's contents are guaranteed before we sample.
+                GL32.glClientWaitSync(fence, GL32.GL_SYNC_FLUSH_COMMANDS_BIT, ACCEL_FENCE_TIMEOUT_NS);
+                GL32.glDeleteSync(fence);
+            }
+            int prev = displayedAccelTexId;
+            displayedAccelTexId = newDisplay;
+            displayedAccelWidth = newW;
+            displayedAccelHeight = newH;
+            // The render thread owns deletion of the texture it just stopped displaying; GL defers the
+            // actual free until the GPU has finished the draw that still referenced it.
+            if (prev != 0 && prev != newDisplay) {
+                glDeleteTextures(prev);
+            }
         }
 
         // The lock is held across the upload: a CEF paint arriving mid-upload waits instead of
@@ -334,28 +430,6 @@ public class MCEFBrowser extends CefBrowserOsr {
         glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
         renderer.onPaint(popup, popupRect.x, popupRect.y, popupRect.width, popupRect.height);
         resetUnpackState();
-    }
-
-    /**
-     * Render-thread hook: import a pending accelerated (shared-texture) frame.
-     */
-    protected void applyAcceleratedFrame(CefAcceleratedPaintInfo info, int width, int height) {
-        renderer.onAcceleratedPaint(info, width, height);
-    }
-
-    /**
-     * Queue an accelerated frame for import on the render thread with an explicit texture size,
-     * bypassing this class's size validation. For subclasses that reinterpret CEF's reported
-     * paint size (CEF sometimes reports stale sizes around resizes).
-     */
-    protected final void queueAcceleratedFrame(CefAcceleratedPaintInfo info, int width, int height) {
-        lastWidth = width;
-        lastHeight = height;
-        synchronized (paintLock) {
-            pendingAcceleratedInfo = info;
-            pendingAcceleratedWidth = width;
-            pendingAcceleratedHeight = height;
-        }
     }
 
     private static void resetUnpackState() {
@@ -570,6 +644,23 @@ public class MCEFBrowser extends CefBrowserOsr {
     // Closing
     public void close() {
         MCEF.INSTANCE.unregisterBrowser(this);
+        browserClosed = true;
+        // Free any accelerated textures/fences we still own. Runs on the render thread (a GL context is
+        // current); the ids are valid to delete from here via the shared object space.
+        int ready, displayed;
+        long readyFence;
+        synchronized (paintLock) {
+            ready = readyAccelTexId;
+            readyFence = readyAccelFence;
+            displayed = displayedAccelTexId;
+            readyAccelTexId = 0;
+            readyAccelFence = 0L;
+            displayedAccelTexId = 0;
+        }
+        // close() is invoked on the render thread (a GL context is current), like renderer.close() below.
+        if (readyFence != 0L) GL32.glDeleteSync(readyFence);
+        if (ready != 0) glDeleteTextures(ready);
+        if (displayed != 0) glDeleteTextures(displayed);
         renderer.close();
         cursorChangeListener.onCursorChange(0);
         super.close(true);
