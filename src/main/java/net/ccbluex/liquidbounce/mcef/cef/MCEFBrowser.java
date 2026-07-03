@@ -83,6 +83,20 @@ public class MCEFBrowser extends CefBrowserOsr {
     private int clicks;
     private int mouseButton;
 
+    // CPU-side paint handoff. CEF delivers onPaint on the CEF message-loop thread (a dedicated
+    // thread on Windows/Linux — see CefMessageLoopThread), which has no GL context. Paints are
+    // composited into this CPU mirror of the page and uploaded on the render thread by
+    // flushFrame() (driven by MCEF.update() once per game frame). Guarded by paintLock.
+    private final Object paintLock = new Object();
+    private ByteBuffer frameMirror;
+    private int frameMirrorWidth = 0, frameMirrorHeight = 0;
+    private Rectangle frameDirty;
+    private boolean frameSizeChanged = false;
+    private boolean popupNeedsUpload = false;
+    private CefAcceleratedPaintInfo pendingAcceleratedInfo;
+    private int pendingAcceleratedWidth = 0, pendingAcceleratedHeight = 0;
+    private String lastDroppedPaintSignature;
+
     private final boolean isMacOs = MCEFPlatform.getPlatform().isMacOS();
     private final boolean isWindows = MCEFPlatform.getPlatform().isWindows();
 
@@ -92,6 +106,7 @@ public class MCEFBrowser extends CefBrowserOsr {
         cursorChangeListener = (cefCursorID) -> setCursor(CefCursorType.fromId(cefCursorID));
 
         MCEF.INSTANCE.host().schedule(renderer::initialize);
+        MCEF.INSTANCE.registerBrowser(this);
     }
 
     public MCEFRenderer getRenderer() {
@@ -123,96 +138,83 @@ public class MCEFBrowser extends CefBrowserOsr {
     @Override
     public void onPopupShow(CefBrowser browser, boolean show) {
         super.onPopupShow(browser, show);
-        showPopup = show;
-        if (!show) popupDrawn = false;
+        synchronized (paintLock) {
+            showPopup = show;
+            if (!show) {
+                // The mirror holds the true page content (CEF keeps the main buffer fully updated
+                // underneath the popup), so restoring is just re-uploading the popup's area.
+                if (popupSize != null) {
+                    addFrameDirty(popupSize);
+                }
+                popupDrawn = false;
+                popupNeedsUpload = false;
+                popupGraphics = null;
+                popupSize = null;
+            }
+        }
     }
 
     @Override
     public void onPopupSize(CefBrowser browser, Rectangle size) {
         super.onPopupSize(browser, size);
-        popupSize = size;
-        this.popupGraphics = ByteBuffer.allocateDirect(
-                size.width * size.height * 4
-        );
+        synchronized (paintLock) {
+            popupSize = size;
+            popupGraphics = ByteBuffer.allocateDirect(size.width * size.height * 4);
+        }
     }
 
-    // Graphics
+    // Graphics.
+    //
+    // Runs on the CEF message-loop thread — NO GL here. The frame is composited into a CPU
+    // mirror; the render thread uploads it in flushFrame().
     @Override
     public void onPaint(CefBrowser browser, boolean popup, Rectangle[] dirtyRects, ByteBuffer buffer, int width, int height) {
         // nothing to update
         if (dirtyRects.length == 0) {
             return;
         }
-        
-        if (!popup) {
-            if (lastWidth != width || lastHeight != height) {
-                lastWidth = width;
-                lastHeight = height;
-                // upload full texture
-                // this also sets up the texture size and creates the texture
-                renderer.onPaint(buffer, width, height);
-            } else {
-                if (renderer.getTextureId() == 0) return;
-                glBindTexture(GL_TEXTURE_2D, renderer.getTextureId());
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, width);
-                for (Rectangle dirtyRect : dirtyRects) {
-                    glPixelStorei(GL_UNPACK_SKIP_PIXELS, dirtyRect.x);
-                    glPixelStorei(GL_UNPACK_SKIP_ROWS, dirtyRect.y);
-                    renderer.onPaint(buffer, dirtyRect.x, dirtyRect.y, dirtyRect.width, dirtyRect.height);
+
+        synchronized (paintLock) {
+            if (!popup) {
+                // The copies below trust width/height; a malformed frame whose buffer is shorter
+                // would read past the source and SIGBUS the JVM. Degrade to a dropped frame.
+                if (!isPaintBufferUsable(false, buffer, width, height)) {
+                    return;
                 }
-                if ((popupDrawn || showPopup) && popupSize != null) {
-                    // interpret where the popup was as a dirty rect
-                    if (!showPopup) {
-                        // if the popup is not visible, just draw the contents of the buffer
-                        glPixelStorei(GL_UNPACK_SKIP_PIXELS, popupSize.width);
-                        glPixelStorei(GL_UNPACK_SKIP_ROWS, popupSize.height);
-                        renderer.onPaint(buffer, popupSize.x, popupSize.y, popupSize.width, popupSize.height);
-                        popupGraphics = null;
-                        popupSize = null;
-                    } else if (popupDrawn) {
-                        // else, a use copy of the popup graphics, as it needs to remain visible
-                        // and for some reason that I do not for the life of me understand, chromium does not seem to keep this data in memory outside of the paint loop, meaning it has to be copied around, which wastes performance
-                        glPixelStorei(GL_UNPACK_ROW_LENGTH, popupSize.width);
-                        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-                        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-                        renderer.onPaint(popupGraphics, popupSize.x, popupSize.y, popupSize.width, popupSize.height);
+                if (frameMirror == null || frameMirrorWidth != width || frameMirrorHeight != height) {
+                    frameMirror = ByteBuffer.allocateDirect(width * height * 4);
+                    frameMirrorWidth = width;
+                    frameMirrorHeight = height;
+                    MemoryUtil.memCopy(
+                            MemoryUtil.memAddress0(buffer),
+                            MemoryUtil.memAddress0(frameMirror),
+                            (long) width * height * 4);
+                    frameSizeChanged = true;
+                    frameDirty = new Rectangle(0, 0, width, height);
+                } else {
+                    for (Rectangle dirtyRect : dirtyRects) {
+                        Rectangle clamped = clampRect(dirtyRect, width, height);
+                        if (clamped == null) continue;
+                        copyRect(buffer, frameMirror, width, clamped);
+                        addFrameDirty(clamped);
                     }
                 }
-            }
-        } else {
-            if (renderer.getTextureId() == 0) return;
-            glBindTexture(GL_TEXTURE_2D, renderer.getTextureId());
-            int start = buffer.capacity();
-            int end = 0;
-            for (Rectangle dirtyRect : dirtyRects) {
-                glPixelStorei(GL_UNPACK_ROW_LENGTH, popupSize.width);
-                glPixelStorei(GL_UNPACK_SKIP_PIXELS, dirtyRect.x);
-                glPixelStorei(GL_UNPACK_SKIP_ROWS, dirtyRect.y);
-                renderer.onPaint(buffer, popupSize.x + dirtyRect.x, popupSize.y + dirtyRect.y, dirtyRect.width, dirtyRect.height);
-
-                int rectStart = (dirtyRect.x + ((dirtyRect.y) * popupSize.width)) << 2;
-                if (rectStart < start) start = rectStart;
-
-                int rectEnd = ((dirtyRect.x + dirtyRect.width) + ((dirtyRect.y + popupSize.height) * dirtyRect.width)) << 2;
-                if (rectEnd > end) end = rectEnd;
-            }
-            if (start < 0) start = 0;
-            if (end > buffer.capacity()) end = buffer.capacity();
-
-            if (end > start) {
-                // TODO: check if it's more performant to go for row-wise copies or if it's better to just copy the updated region
-                if (this.popupGraphics != null) {
-                    long addrFrom = MemoryUtil.memAddress(buffer);
-                    long addrTo = MemoryUtil.memAddress(popupGraphics);
-                    MemoryUtil.memCopy(
-                            addrFrom + start,
-                            addrTo + start,
-                            (end - start)
-                    );
+            } else {
+                if (popupSize == null || popupGraphics == null) {
+                    return;
                 }
+                if (!isPaintBufferUsable(true, buffer, popupSize.width, popupSize.height)) {
+                    return;
+                }
+                // Popup paints arrive in popup-local coordinates with a popup-sized buffer.
+                for (Rectangle dirtyRect : dirtyRects) {
+                    Rectangle clamped = clampRect(dirtyRect, popupSize.width, popupSize.height);
+                    if (clamped == null) continue;
+                    copyRect(buffer, popupGraphics, popupSize.width, clamped);
+                }
+                popupDrawn = true;
+                popupNeedsUpload = true;
             }
-
-            popupDrawn = true;
         }
         super.onPaint(browser, popup, dirtyRects, buffer, width, height);
     }
@@ -247,12 +249,172 @@ public class MCEFBrowser extends CefBrowserOsr {
         }
 
         if (!popup) {
-            renderer.onAcceleratedPaint(info, width, height);
+            // Defer the GL import to the render thread; only the newest frame matters.
+            synchronized (paintLock) {
+                pendingAcceleratedInfo = info;
+                pendingAcceleratedWidth = width;
+                pendingAcceleratedHeight = height;
+            }
         } else {
             MCEF.INSTANCE.LOGGER.warn("Accelerated paint for popups is not supported in MCEF.");
         }
 
         super.onAcceleratedPaint(browser, popup, dirtyRects, info);
+    }
+
+    /**
+     * Upload any pending browser frame to the GPU. Called on the render thread once per game
+     * frame via {@link MCEF#update()}.
+     */
+    public final void flushFrame() {
+        CefAcceleratedPaintInfo acceleratedInfo;
+        int acceleratedWidth, acceleratedHeight;
+        synchronized (paintLock) {
+            acceleratedInfo = pendingAcceleratedInfo;
+            acceleratedWidth = pendingAcceleratedWidth;
+            acceleratedHeight = pendingAcceleratedHeight;
+            pendingAcceleratedInfo = null;
+        }
+        if (acceleratedInfo != null) {
+            applyAcceleratedFrame(acceleratedInfo, acceleratedWidth, acceleratedHeight);
+        }
+
+        // The lock is held across the upload: a CEF paint arriving mid-upload waits instead of
+        // mutating the mirror underneath the GL call. That back-pressure is bounded by one upload.
+        synchronized (paintLock) {
+            if (frameMirror != null && frameDirty != null) {
+                uploadFrame(frameMirror, frameMirrorWidth, frameMirrorHeight, frameDirty, frameSizeChanged);
+                frameDirty = null;
+                frameSizeChanged = false;
+                if (showPopup && popupDrawn) {
+                    // The main upload may have overwritten the popup's area; re-composite it.
+                    popupNeedsUpload = true;
+                }
+            }
+            if (showPopup && popupDrawn && popupNeedsUpload && popupGraphics != null && popupSize != null) {
+                uploadPopup(popupGraphics, popupSize, frameMirrorWidth, frameMirrorHeight);
+                popupNeedsUpload = false;
+            }
+        }
+    }
+
+    /**
+     * Render-thread hook: land a dirty region of the CPU frame mirror in the GPU texture. The
+     * default routes through the raw-GL {@link MCEFRenderer}; hosts with their own GPU
+     * abstraction can override (buffer position/limit must be left untouched).
+     *
+     * @param frame      full BGRA frame mirror ({@code width * height * 4} bytes)
+     * @param dirty      the region needing upload
+     * @param fullUpload true when the frame size changed (the texture must be (re)created)
+     */
+    protected void uploadFrame(ByteBuffer frame, int width, int height, Rectangle dirty, boolean fullUpload) {
+        if (fullUpload || renderer.getTextureId() == 0) {
+            renderer.onPaint(frame, width, height);
+            resetUnpackState();
+            return;
+        }
+        glBindTexture(GL_TEXTURE_2D, renderer.getTextureId());
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, width);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, dirty.x);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, dirty.y);
+        renderer.onPaint(frame, dirty.x, dirty.y, dirty.width, dirty.height);
+        resetUnpackState();
+    }
+
+    /**
+     * Render-thread hook: composite the popup (dropdown) overlay over the frame texture.
+     */
+    protected void uploadPopup(ByteBuffer popup, Rectangle popupRect, int frameWidth, int frameHeight) {
+        if (renderer.getTextureId() == 0) {
+            return;
+        }
+        glBindTexture(GL_TEXTURE_2D, renderer.getTextureId());
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, popupRect.width);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        renderer.onPaint(popup, popupRect.x, popupRect.y, popupRect.width, popupRect.height);
+        resetUnpackState();
+    }
+
+    /**
+     * Render-thread hook: import a pending accelerated (shared-texture) frame.
+     */
+    protected void applyAcceleratedFrame(CefAcceleratedPaintInfo info, int width, int height) {
+        renderer.onAcceleratedPaint(info, width, height);
+    }
+
+    /**
+     * Queue an accelerated frame for import on the render thread with an explicit texture size,
+     * bypassing this class's size validation. For subclasses that reinterpret CEF's reported
+     * paint size (CEF sometimes reports stale sizes around resizes).
+     */
+    protected final void queueAcceleratedFrame(CefAcceleratedPaintInfo info, int width, int height) {
+        lastWidth = width;
+        lastHeight = height;
+        synchronized (paintLock) {
+            pendingAcceleratedInfo = info;
+            pendingAcceleratedWidth = width;
+            pendingAcceleratedHeight = height;
+        }
+    }
+
+    private static void resetUnpackState() {
+        // Leave the pixel-store state the way Minecraft expects it, instead of letting our
+        // row-length/skip values poison the next texture upload that runs on this context.
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    }
+
+    /** Grow the pending dirty union. Caller holds paintLock. */
+    private void addFrameDirty(Rectangle rect) {
+        Rectangle clamped = clampRect(rect, frameMirrorWidth, frameMirrorHeight);
+        if (clamped == null) {
+            return;
+        }
+        if (frameDirty == null) {
+            frameDirty = new Rectangle(clamped);
+        } else {
+            frameDirty = frameDirty.union(clamped);
+        }
+    }
+
+    private static Rectangle clampRect(Rectangle rect, int width, int height) {
+        int x = Math.max(0, rect.x);
+        int y = Math.max(0, rect.y);
+        int maxX = Math.min(width, rect.x + rect.width);
+        int maxY = Math.min(height, rect.y + rect.height);
+        if (maxX <= x || maxY <= y) {
+            return null;
+        }
+        return new Rectangle(x, y, maxX - x, maxY - y);
+    }
+
+    /** Row-wise copy of {@code rect} between two full-frame BGRA buffers of row width {@code rowWidth}. */
+    private static void copyRect(ByteBuffer src, ByteBuffer dst, int rowWidth, Rectangle rect) {
+        long srcAddr = MemoryUtil.memAddress0(src);
+        long dstAddr = MemoryUtil.memAddress0(dst);
+        long rowBytes = (long) rect.width * 4;
+        for (int row = 0; row < rect.height; row++) {
+            long offset = ((long) (rect.y + row) * rowWidth + rect.x) * 4;
+            MemoryUtil.memCopy(srcAddr + offset, dstAddr + offset, rowBytes);
+        }
+    }
+
+    private boolean isPaintBufferUsable(boolean popup, ByteBuffer buffer, int width, int height) {
+        if (width <= 0 || height <= 0 || buffer == null || !buffer.isDirect()
+                || buffer.capacity() < (long) width * height * 4) {
+            String signature = popup + ":" + width + ":" + height + ":"
+                    + (buffer == null ? -1 : buffer.capacity());
+            if (!signature.equals(lastDroppedPaintSignature)) {
+                lastDroppedPaintSignature = signature;
+                MCEF.INSTANCE.LOGGER.warn(
+                        "Dropped browser paint to avoid out-of-bounds copy: popup={}, size={}x{}, bufferBytes={}",
+                        popup, width, height, buffer == null ? -1 : buffer.capacity());
+            }
+            return false;
+        }
+        return true;
     }
 
     public void resize(int width, int height) {
@@ -407,6 +569,7 @@ public class MCEFBrowser extends CefBrowserOsr {
 
     // Closing
     public void close() {
+        MCEF.INSTANCE.unregisterBrowser(this);
         renderer.close();
         cursorChangeListener.onCursorChange(0);
         super.close(true);
@@ -427,12 +590,14 @@ public class MCEFBrowser extends CefBrowserOsr {
     }
 
     public void setCursor(CefCursorType cursorType) {
-        var windowHandle = MCEF.INSTANCE.host().windowHandle();
-
         // We do not want to change the cursor state since Minecraft does this for us.
         if (cursorType == CefCursorType.NONE) return;
 
-        GLFW.glfwSetCursor(windowHandle, MCEFGlfwCursorHelper.getGLFWCursorHandle(cursorType));
+        // Cursor changes arrive on the CEF message-loop thread; GLFW calls are main-thread-only.
+        MCEF.INSTANCE.host().schedule(() -> {
+            var windowHandle = MCEF.INSTANCE.host().windowHandle();
+            GLFW.glfwSetCursor(windowHandle, MCEFGlfwCursorHelper.getGLFWCursorHandle(cursorType));
+        });
     }
 
     /**

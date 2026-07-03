@@ -45,6 +45,8 @@ public enum MCEF {
     private @Nullable MCEFApp app;
     private @Nullable MCEFClient client;
     private @Nullable MCEFDownloadManager resourceManager;
+    private final java.util.concurrent.CopyOnWriteArrayList<MCEFBrowser> browsers =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
     
     public Logger getLogger() {
         return LOGGER;
@@ -174,6 +176,47 @@ public enum MCEF {
      */
     public boolean isInitialized() {
         return client != null;
+    }
+
+    /** Internal: browsers currently alive, flushed by {@link #update()}. */
+    public void registerBrowser(MCEFBrowser browser) {
+        browsers.addIfAbsent(browser);
+    }
+
+    /** Internal: called from {@link MCEFBrowser#close()}. */
+    public void unregisterBrowser(MCEFBrowser browser) {
+        browsers.remove(browser);
+    }
+
+    /**
+     * Per-frame driver; call once per game frame ON THE RENDER THREAD (before the frame's own
+     * rendering).
+     *
+     * <p>On Windows/Linux CEF runs on its own message-loop thread (see {@link
+     * net.ccbluex.liquidbounce.mcef.cef.CefMessageLoopThread}); this only uploads the frames that
+     * thread has buffered. On macOS the render thread still IS the CEF thread, so this pumps the
+     * CEF message loop first (paints land in the CPU buffers synchronously) and uploads right
+     * after — same-frame delivery, exactly as before.
+     */
+    public void update() {
+        if (!isInitialized()) {
+            return;
+        }
+        if (MCEFPlatform.getPlatform().isMacOS()) {
+            assert app != null;
+            try {
+                app.getHandle().N_DoMessageLoopWork();
+            } catch (Exception e) {
+                LOGGER.error("CefDoMessageLoopWork failed", e);
+            }
+        }
+        for (MCEFBrowser browser : browsers) {
+            try {
+                browser.flushFrame();
+            } catch (Exception e) {
+                LOGGER.error("Failed to flush browser frame", e);
+            }
+        }
     }
 
     /**

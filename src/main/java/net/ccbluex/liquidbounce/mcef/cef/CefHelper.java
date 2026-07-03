@@ -45,6 +45,7 @@ public final class CefHelper {
     private static boolean initialized;
     private static CefApp cefAppInstance;
     private static CefClient cefClientInstance;
+    private static CefMessageLoopThread messageLoopThread;
 
     private static void setUnixExecutable(File file) {
         Set<PosixFilePermission> perms = EnumSet.of(
@@ -107,9 +108,6 @@ public final class CefHelper {
         }
 
         System.setProperty("jcef.path", platformDirectory.getAbsolutePath());
-        if (!CefApp.startup(cefSwitches)) {
-            return false;
-        }
 
         var cefSettings = new CefSettings();
         cefSettings.windowless_rendering_enabled = true;
@@ -124,8 +122,41 @@ public final class CefHelper {
             cefSettings.user_agent_product = "MCEF/2";
         }
 
-        cefAppInstance = CefApp.getInstance(cefSwitches, cefSettings);
-        cefClientInstance = cefAppInstance.createClient();
+        if (platform.isMacOS()) {
+            // macOS: CEF work is marshalled onto the AppKit main thread by the native layer, and
+            // the game pumps N_DoMessageLoopWork once per frame from MCEF.update(). Initialize
+            // inline (on the render thread), exactly as before.
+            if (!CefApp.startup(cefSwitches)) {
+                return false;
+            }
+            cefAppInstance = CefApp.getInstance(cefSwitches, cefSettings);
+            cefClientInstance = cefAppInstance.createClient();
+            return initialized = true;
+        }
+
+        // Windows/Linux: run the whole CEF browser-process-UI-thread lifecycle on a dedicated
+        // thread. CefInitialize binds the UI thread to whichever thread calls it, so startup,
+        // CefApp construction and client creation (which triggers N_Initialize) must all happen
+        // there — and the scheduler must be installed FIRST, because CEF starts requesting pump
+        // work during initialization already.
+        messageLoopThread = new CefMessageLoopThread();
+        CefApp.setMessagePumpScheduler(messageLoopThread);
+        var pumpThread = messageLoopThread;
+        Boolean ok = pumpThread.invokeAndWait(() -> {
+            if (!CefApp.startup(cefSwitches)) {
+                return false;
+            }
+            cefAppInstance = CefApp.getInstance(cefSwitches, cefSettings);
+            cefClientInstance = cefAppInstance.createClient();
+            pumpThread.attachPumpTarget(cefAppInstance);
+            return true;
+        });
+        if (ok == null || !ok) {
+            CefApp.setMessagePumpScheduler(null);
+            messageLoopThread.stop();
+            messageLoopThread = null;
+            return false;
+        }
 
         return initialized = true;
     }
@@ -134,18 +165,40 @@ public final class CefHelper {
         if (isInitialized()) {
             initialized = false;
 
-            try {
-                cefClientInstance.dispose();
-            } catch (Exception e) {
-                MCEF.INSTANCE.getLogger().error("Failed to dispose CefClient", e);
-            }
+            Runnable dispose = () -> {
+                try {
+                    cefClientInstance.dispose();
+                } catch (Exception e) {
+                    MCEF.INSTANCE.getLogger().error("Failed to dispose CefClient", e);
+                }
 
-            try {
-                cefAppInstance.dispose();
-            } catch (Exception e) {
-                MCEF.INSTANCE.getLogger().error("Failed to dispose CefApp", e);
+                try {
+                    cefAppInstance.dispose();
+                } catch (Exception e) {
+                    MCEF.INSTANCE.getLogger().error("Failed to dispose CefApp", e);
+                }
+            };
+
+            if (messageLoopThread != null) {
+                // N_Shutdown must run on the thread that ran CefInitialize. Bounded wait: this is
+                // called from a JVM shutdown hook and must not wedge process exit.
+                messageLoopThread.invokeAndWait(() -> {
+                    dispose.run();
+                    return null;
+                }, 5000);
+                messageLoopThread.stop();
+                messageLoopThread = null;
+            } else {
+                dispose.run();
             }
         }
+    }
+
+    /**
+     * The dedicated CEF UI thread, or null on macOS (where the render thread pumps per-frame).
+     */
+    public static CefMessageLoopThread getMessageLoopThread() {
+        return messageLoopThread;
     }
 
     public static boolean isInitialized() {

@@ -14,7 +14,6 @@ import java.nio.file.Paths;
 import java.util.HashSet;
 
 import javax.swing.SwingUtilities;
-import javax.swing.Timer;
 
 /**
  * Exposes static methods for managing the global CEF context.
@@ -127,7 +126,6 @@ public class CefApp extends CefAppHandlerAdapter {
     private static CefApp self = null;
     private static CefAppHandler appHandler_ = null;
     private static CefAppState state_ = CefAppState.NONE;
-    private Timer workTimer_ = null;
     private HashSet<CefClient> clients_ = new HashSet<CefClient>();
     private CefSettings settings_ = null;
 
@@ -428,11 +426,36 @@ public class CefApp extends CefAppHandlerAdapter {
     }
 
     /**
-     * Perform a single message loop iteration. Used on all platforms except
-     * Windows with windowed rendering.
+     * Receives CEF's OnScheduleMessagePumpWork requests (this jcef always initializes CEF with
+     * external_message_pump=true when windowless — see native context.cpp). CEF calls this from
+     * arbitrary threads whenever work is posted to the browser-process UI thread, telling the
+     * embedder when N_DoMessageLoopWork must next be called. Implementations must be thread-safe
+     * and non-blocking.
+     */
+    public interface MessagePumpScheduler {
+        void scheduleMessagePumpWork(long delayMs);
+    }
+
+    private static volatile MessagePumpScheduler messagePumpScheduler_ = null;
+
+    /**
+     * Install the scheduler that receives CEF's pump-work requests. With no scheduler installed the
+     * requests are dropped and the embedder must call {@link #N_DoMessageLoopWork()} on its own
+     * cadence (the legacy per-frame mode, still used on macOS).
+     */
+    public static void setMessagePumpScheduler(MessagePumpScheduler scheduler) {
+        messagePumpScheduler_ = scheduler;
+    }
+
+    /**
+     * Called (via CefAppHandlerAdapter.onScheduleMessagePumpWork) from native code whenever CEF
+     * schedules message pump work. Forwards to the installed {@link MessagePumpScheduler}.
      */
     public final void doMessageLoopWork(final long delay_ms) {
-        // Do nothing, handled by custom game tick loop
+        MessagePumpScheduler scheduler = messagePumpScheduler_;
+        if (scheduler != null) {
+            scheduler.scheduleMessagePumpWork(delay_ms);
+        }
     }
 
     /**
