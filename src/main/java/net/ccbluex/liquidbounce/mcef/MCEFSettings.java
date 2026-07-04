@@ -41,7 +41,14 @@ public class MCEFSettings {
             "--autoplay-policy=no-user-gesture-required",
             "--disable-web-security",
             "--enable-widevine-cdm",
-            "--off-screen-rendering-enabled"
+            "--off-screen-rendering-enabled",
+            // GPU-side rasterization + zero-copy raster buffers. These only pay off on the accelerated
+            // (shared-texture) path — they let complex pages (blur, gradients, large composited layers)
+            // rasterize on the GPU and write straight into the texture the compositor samples, instead of
+            // through CPU raster tiles. On the software onPaint fallback CEF still reads the frame back to
+            // the CPU, so they are inert there rather than harmful.
+            "--enable-gpu-rasterization",
+            "--enable-zero-copy"
     ));
     private File cacheDirectory = null;
     private File librariesDirectory = null;

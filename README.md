@@ -69,4 +69,66 @@ git submodule update --init --recursive java-cef
 ./gradlew build
 ```
 
+## Distribution (private, via GitHub Packages)
+
+This library is **closed-source** and distributed as a private Maven artifact on GitHub Packages at
+`https://maven.pkg.github.com/FPSMasterTeam/mcef-nova` under the coordinate
+`com.github.FPSMasterTeam:mcef-nova:<version>`. Both publishing here and consuming it elsewhere
+require a GitHub token — GitHub Packages authenticates even for reads.
+
+### Personal Access Token (one-time)
+
+1. Go to **GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)** and
+   **Generate new token (classic)**.
+2. Select scopes:
+   - `read:packages` — to *consume* the artifact (what most developers need).
+   - `write:packages` — additionally, to *publish* from your machine.
+3. Copy the token (starts with `ghp_…`).
+
+### Configure your machine
+
+Add the credentials to your **global** Gradle properties (`~/.gradle/gradle.properties`) so they
+stay out of any repo:
+
+```properties
+gpr.user=<your-github-username>
+gpr.key=<your-ghp_-token>
+```
+
+Both this repo's `build.gradle` (publishing) and the host mod's `build.gradle.kts` (consuming) read
+`gpr.user` / `gpr.key`, falling back to the `GITHUB_ACTOR` / `GITHUB_TOKEN` environment variables
+that GitHub Actions injects automatically. So CI needs no manual token — only `packages: read`
+(consume) or `packages: write` (publish) permission in the workflow.
+
+### Publishing
+
+- **Release** (recommended for a real version): publish a GitHub Release; `.github/workflows/
+  maven-publish.yml` builds and publishes that `mod_version` to GitHub Packages.
+- **Snapshot**: a push to `master` publishes `<mod_version>-SNAPSHOT` via `maven-snapshot.yml`.
+- **Locally**: `./gradlew publish` (needs `gpr.*` with `write:packages`).
+
+Bump `mod_version` in `gradle.properties` for every change consumers must pick up — Maven caches a
+fixed version, so reusing one hides updates.
+
+### Consuming
+
+In the host project, add the repository (with the same credential fallback) and depend on the
+coordinate — see `FPSMaster-Nova/build.gradle.kts`:
+
+```kotlin
+repositories {
+    maven {
+        url = uri("https://maven.pkg.github.com/FPSMasterTeam/mcef-nova")
+        credentials {
+            username = (project.findProperty("gpr.user") as String?) ?: System.getenv("GITHUB_ACTOR")
+            password = (project.findProperty("gpr.key") as String?) ?: System.getenv("GITHUB_TOKEN")
+        }
+    }
+}
+dependencies { implementation("com.github.FPSMasterTeam:mcef-nova:1.0.1") }
+```
+
+For CI in a **different** repo to read this package, grant that repo access under
+**mcef-nova → Package settings → Manage Actions access → Add repository (Read)**, or use a PAT secret.
+
 Forked from CCBlueX/mcef (LGPL-2.1). See `LICENSE`.

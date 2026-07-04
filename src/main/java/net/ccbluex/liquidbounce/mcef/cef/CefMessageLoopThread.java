@@ -51,10 +51,15 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class CefMessageLoopThread implements CefApp.MessagePumpScheduler {
 
     /**
-     * Upper clamp for CEF-requested pump delays, mirroring cefclient's external pump reference
-     * implementation (kMaxTimerDelay = 1000/30). Guards against a lost wakeup starving the loop.
+     * Upper clamp for CEF-requested pump delays. cefclient's reference external pump uses
+     * kMaxTimerDelay = 1000/30 (~33 ms); we clamp tighter (1000/120 ≈ 8 ms) so timer-driven CEF work
+     * — CSS animations, setTimeout, and the worst-case input→process latency when the pump was parked
+     * on a far-off deadline — is serviced within roughly one 120 Hz frame instead of two 30 Hz ones.
+     * Immediate work is unaffected: CEF schedules those with delay 0 and the loop wakes at once via
+     * notifyAll. The only cost of the tighter clamp is a few extra idle wakeups per second, each a
+     * near-no-op N_DoMessageLoopWork. Also guards against a lost wakeup starving the loop.
      */
-    private static final long MAX_TIMER_DELAY_MS = 1000L / 30L;
+    private static final long MAX_TIMER_DELAY_MS = 1000L / 120L;
 
     /**
      * Pump at least this often even if CEF never schedules work — pure insurance; with

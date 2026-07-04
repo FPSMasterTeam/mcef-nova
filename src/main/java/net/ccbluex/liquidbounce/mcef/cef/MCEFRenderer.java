@@ -45,6 +45,8 @@ import static org.lwjgl.opengl.GL11.*;
 import static org.lwjgl.opengl.GL12.GL_BGRA;
 import static org.lwjgl.opengl.GL12.GL_UNSIGNED_INT_8_8_8_8_REV;
 import static org.lwjgl.opengl.GL30.GL_RGBA8;
+import static org.lwjgl.opengl.GL33.GL_TEXTURE_SWIZZLE_B;
+import static org.lwjgl.opengl.GL33.GL_TEXTURE_SWIZZLE_R;
 // (GL_RGBA8 is provided by GL30 in LWJGL 3)
 
 /**
@@ -75,8 +77,33 @@ public class MCEFRenderer implements Closeable {
     private boolean unpainted = true;
     private boolean isAccelerated = false;
 
+    /**
+     * When true, a freshly imported accelerated texture gets a GL swizzle mask that swaps its R and B
+     * channels at sample time. CEF's shared texture is BGRA bytes imported as RGBA8, so a host that
+     * draws it through a PLAIN {@code position_tex} shader (the legacy immediate-mode path, MC &lt;1.21.5)
+     * would otherwise show red and blue swapped. Modern hosts (1.21.5+) instead swap R/B in a dedicated
+     * shader and draw the CPU and GPU textures through the same path, so they leave this {@code false}.
+     *
+     * <p>Set once by the host at startup (before any browser is created). Global rather than per-browser
+     * because the draw convention is a property of the Minecraft version, not the individual browser.
+     */
+    public static volatile boolean accelSwizzleBgra = false;
+
     protected MCEFRenderer(boolean transparent) {
         this.transparent = transparent;
+    }
+
+    /**
+     * Apply the R/B swizzle to the currently bound texture when {@link #accelSwizzleBgra} is set. The
+     * swap is unconditional (not gated on {@link #isBGRA}) so it mirrors exactly what the modern host's
+     * BGRA shader does, keeping legacy and modern output identical. The texture must be bound to
+     * {@code GL_TEXTURE_2D} when this is called.
+     */
+    private static void applyAccelSwizzleIfEnabled() {
+        if (accelSwizzleBgra) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+        }
     }
 
     /**
@@ -224,6 +251,7 @@ public class MCEFRenderer implements Closeable {
         unpainted = false;
         isBGRA = true;
 
+        applyAccelSwizzleIfEnabled();
         glBindTexture(GL_TEXTURE_2D, 0);
         return newTextureId;
     }
@@ -338,6 +366,7 @@ public class MCEFRenderer implements Closeable {
             unpainted = false;
             isBGRA = info.format != CefConstants.CEF_COLOR_TYPE_BGRA_8888;
 
+            applyAccelSwizzleIfEnabled();
             glBindTexture(GL_TEXTURE_2D, 0);
             return newTextureId;
         }

@@ -2,6 +2,13 @@ name: Maven Snapshot
 
 on:
   push:
+    branches:
+      - master
+      - main
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   snapshot:
@@ -24,10 +31,10 @@ jobs:
       - name: Build with Gradle
         run: ./gradlew build
 
-      - name: Publish Snapshot to CCBlueX Maven
+      - name: Publish Snapshot to GitHub Packages
         env:
-          MAVEN_TOKEN_NAME: ${{ secrets.MAVEN_TOKEN_NAME }}
-          MAVEN_TOKEN_SECRET: ${{ secrets.MAVEN_TOKEN_SECRET }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(grep "^mod_version=" gradle.properties | cut -d'=' -f2)
           ./gradlew publish -Pmod_version="${VERSION}-SNAPSHOT"

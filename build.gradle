@@ -121,4 +121,19 @@ publishing {
             from components.java
         }
     }
+    repositories {
+        // Private distribution via GitHub Packages (the repo is closed-source). Consumers add the same
+        // URL as a Maven repo and authenticate with a token — see FPSMaster-Nova/build.gradle.kts.
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/FPSMasterTeam/mcef-nova")
+            credentials {
+                // CI: the workflows inject the built-in GITHUB_ACTOR + GITHUB_TOKEN.
+                // Local publish: set gpr.user / gpr.key (a PAT with write:packages) in
+                // ~/.gradle/gradle.properties.
+                username = project.findProperty("gpr.user") ?: System.getenv("GITHUB_ACTOR")
+                password = project.findProperty("gpr.key") ?: System.getenv("GITHUB_TOKEN")
+            }
+        }
+    }
 }
