@@ -27,21 +27,17 @@ public class MCEFBrowserSettings extends CefBrowserSettings {
     public MCEFBrowserSettings(int frameRate, boolean sharedTextureEnabled) {
         super();
         this.windowless_frame_rate = frameRate;
-        // Zero-copy GPU acceleration (shared_texture_enabled) delivers frames via onAcceleratedPaint,
-        // whose shared_texture_handle is only valid FOR THE DURATION OF THE CALLBACK. On Windows/Linux
-        // that callback runs on the dedicated CEF message-loop thread (CefMessageLoopThread), which has
-        // no GL context of its own — so the import must happen on a GL context bound to THAT thread.
+        // Zero-copy GPU acceleration (shared_texture_enabled) only works when the CEF message loop is
+        // pumped on the render thread (no CefMessageLoopThread — macOS, or -Dmcef.pumpOnRenderThread):
+        // onAcceleratedPaint then runs on the render thread with Minecraft's GL context current and
+        // imports the handle synchronously, exactly like LiquidBounce's shipped setup.
         //
-        // When a shared GL context is available (MCEFGlContext: a hidden GLFW window sharing Minecraft's
-        // context, made current on the CEF thread), the handle is imported inside the callback there and
-        // the resulting texture — visible in Minecraft's context via object sharing — is handed to the
-        // render thread with a GL fence. If that context couldn't be created, we must NOT enable zero
-        // copy (a deferred cross-thread import uses a recycled handle -> GL_OUT_OF_MEMORY, black webview);
-        // fall back to the CPU onPaint path instead.
-        //
-        // macOS has no message-loop thread (CEF is pumped on the render thread), so onAcceleratedPaint
-        // imports synchronously with a live handle and needs no shared context.
-        boolean canZeroCopy = CefHelper.getMessageLoopThread() == null || MCEFGlContext.isAvailable();
+        // With the dedicated CEF thread, importing on a second shared GL context DID
+        // record correct frames, but CEF's native accelerated OSR then delivers exactly ONE
+        // onAcceleratedPaint and stalls (verified empirically; keyed-mutex, visibility and
+        // texture-release theories all ruled out). So zero copy is gated to the render-thread pump and
+        // browsers on the dedicated-thread setup fall back to the CPU onPaint path.
+        boolean canZeroCopy = CefHelper.getMessageLoopThread() == null;
         this.shared_texture_enabled = sharedTextureEnabled && canZeroCopy;
     }
 }

@@ -202,7 +202,9 @@ public enum MCEF {
         if (!isInitialized()) {
             return;
         }
-        if (MCEFPlatform.getPlatform().isMacOS()) {
+        if (CefHelper.getMessageLoopThread() == null) {
+            // No dedicated CEF thread (macOS, or -Dmcef.pumpOnRenderThread): this render thread IS
+            // the CEF UI thread — pump it once per frame.
             assert app != null;
             try {
                 app.getHandle().N_DoMessageLoopWork();

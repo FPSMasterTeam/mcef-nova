@@ -97,10 +97,10 @@ public class MCEFBrowser extends CefBrowserOsr {
     private String lastDroppedPaintSignature;
 
     // Zero-copy accelerated paint handoff (Windows/Linux). CEF's shared texture is imported into a GL
-    // texture ON THE CEF THREAD inside onAcceleratedPaint (MCEFGlContext bound there), while the handle
-    // is still valid, then handed to the render thread behind a GL fence. readyAccel* are produced by
-    // the CEF thread and consumed by the render thread (guarded by paintLock); displayedAccel* are
-    // render-thread-owned (what Nova samples). See onAcceleratedPaint / flushFrame.
+    // texture inside onAcceleratedPaint while the handle is still valid; shared_texture is only enabled
+    // with the render-thread pump (see MCEFBrowserSettings), so the import runs on the render thread
+    // with Minecraft's GL context current. readyAccel* buffer the newest import until flushFrame adopts
+    // it (guarded by paintLock); displayedAccel* are render-thread-owned (what the host samples).
     private int readyAccelTexId = 0;
     private long readyAccelFence = 0L;
     private int readyAccelWidth = 0, readyAccelHeight = 0;
@@ -267,14 +267,10 @@ public class MCEFBrowser extends CefBrowserOsr {
             return;
         }
 
-        // Import CEF's shared texture into a GL texture RIGHT HERE, on this (CEF message-loop) thread,
-        // while the handle is valid. Bind the shared GL context first (Win/Linux); on a platform with
-        // no message-loop thread this callback is already on the render thread with MC's context.
-        MCEFGlContext glContext = MCEFGlContext.get();
-        if (glContext != null && !glContext.ensureCurrentOnCefThread()) {
-            super.onAcceleratedPaint(browser, popup, dirtyRects, info);
-            return;
-        }
+        // Import CEF's shared texture into a GL texture RIGHT HERE, while the handle is valid.
+        // shared_texture is only ever enabled when the CEF loop is pumped on the render thread
+        // (see MCEFBrowserSettings), so this callback runs on the render thread with Minecraft's
+        // GL context current.
         if (browserClosed) {
             return;
         }
@@ -359,8 +355,7 @@ public class MCEFBrowser extends CefBrowserOsr {
         }
         if (newDisplay != 0) {
             if (fence != 0L) {
-                // Server-side ordering would suffice, but the import ran on another context: wait on
-                // the client side (bounded) so the texture's contents are guaranteed before we sample.
+                // Bounded wait so the import's GPU work is complete before we sample the texture.
                 GL32.glClientWaitSync(fence, GL32.GL_SYNC_FLUSH_COMMANDS_BIT, ACCEL_FENCE_TIMEOUT_NS);
                 GL32.glDeleteSync(fence);
             }

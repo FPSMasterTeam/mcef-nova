@@ -122,7 +122,12 @@ public final class CefHelper {
             cefSettings.user_agent_product = "MCEF/2";
         }
 
-        if (platform.isMacOS()) {
+        // -Dmcef.pumpOnRenderThread=true (Win/Linux): legacy single-thread mode, matching
+        // LiquidBounce's shipped setup. CefInitialize binds the browser UI thread to the render
+        // thread and MCEF.update() pumps N_DoMessageLoopWork once per frame, so ALL CEF callbacks
+        // (including onAcceleratedPaint) run on the render thread with Minecraft's GL context
+        // current — accelerated imports land directly in the main context, no shared context.
+        if (platform.isMacOS() || Boolean.getBoolean("mcef.pumpOnRenderThread")) {
             // macOS: CEF work is marshalled onto the AppKit main thread by the native layer, and
             // the game pumps N_DoMessageLoopWork once per frame from MCEF.update(). Initialize
             // inline (on the render thread), exactly as before.
@@ -158,18 +163,11 @@ public final class CefHelper {
             return false;
         }
 
-        // Zero-copy accelerated paint on Win/Linux needs a GL context on the CEF thread that shares
-        // objects with Minecraft's context, so CEF's shared-texture handle can be imported inside the
-        // onAcceleratedPaint callback (its only valid window). We are on the render thread here (this
-        // method is called from MCEF.initialize on the render thread), so this is where the shared
-        // GLFW window must be created. If it fails, MCEFBrowserSettings keeps shared_texture disabled
-        // and browsers fall back to the CPU paint path.
-        try {
-            MCEFGlContext.create(MCEF.INSTANCE.host().windowHandle());
-        } catch (Throwable t) {
-            MCEF.INSTANCE.getLogger().warn("Shared GL context unavailable; using CPU paint path", t);
-        }
-
+        // NOTE: zero-copy accelerated paint is NOT available in this (dedicated-thread) mode —
+        // importing CEF's shared texture on a second shared GL context produced
+        // correct frames, but CEF's native accelerated OSR then delivers exactly one
+        // onAcceleratedPaint and stalls. MCEFBrowserSettings therefore forces shared_texture off
+        // here; hosts that want acceleration must set -Dmcef.pumpOnRenderThread=true before init.
         return initialized = true;
     }
 
