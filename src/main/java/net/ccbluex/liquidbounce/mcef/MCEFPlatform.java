@@ -21,9 +21,6 @@
 
 package net.ccbluex.liquidbounce.mcef;
 
-import okio.Okio;
-
-import java.io.IOException;
 import java.util.Locale;
 
 public enum MCEFPlatform {
@@ -119,84 +116,26 @@ public enum MCEFPlatform {
         };
     }
 
+    /**
+     * Windows 10+ only, without spawning PowerShell/wmic (CurseForge forbids shipping
+     * mods that invoke shell interpreters at runtime).
+     */
     private static boolean checkWindowsCompatibility() {
-        try {
-            var buildNumber = getWindowsBuildNumber();
-            MCEF.INSTANCE.getLogger().info("Windows build number: {}", buildNumber);
+        var osName = System.getProperty("os.name", "").toLowerCase(Locale.ENGLISH);
+        var osVersion = System.getProperty("os.version", "");
+        MCEF.INSTANCE.getLogger().info("Windows os.name={}, os.version={}", osName, osVersion);
 
-            if (buildNumber == null) {
-                MCEF.INSTANCE.getLogger().error("Failed to get Windows build number");
-                return true; // Assume compatibility
-            }
-
-            return Integer.parseInt(buildNumber) >= 10240; // Windows 10 minimum
-        } catch (NumberFormatException e) {
-            MCEF.INSTANCE.getLogger().error("Failed to parse Windows build number", e);
-            return true; // Assume compatibility
+        if (osName.contains("windows 10") || osName.contains("windows 11")) {
+            return true;
         }
-    }
 
-    private static String getWindowsBuildNumber() {
-        var cmdArray = new String[]{"powershell.exe", "-Command", "\"[System.Environment]::OSVersion.Version.Build\""};
-
-        Process process = null;
+        // Modern JDKs typically report "10.0" for Windows 10/11.
         try {
-            process = new ProcessBuilder(cmdArray).redirectErrorStream(true).start();
-            try (var source = Okio.buffer(Okio.source(process.getInputStream()))) {
-                String result = source.readUtf8().trim();
-
-                int exitCode = process.waitFor();
-                if (exitCode != 0) {
-                    MCEF.INSTANCE.getLogger().error("PS system environment command exit code: {}", exitCode);
-                }
-
-                if (result.isEmpty()) {
-                    result = getWmicBuildNumber();
-                }
-
-                process.waitFor(); // Wait for process to complete
-                return result;
-            }
-        } catch (IOException | InterruptedException e) {
-            MCEF.INSTANCE.getLogger().error("Failed to execute command to get Windows build number", e);
-            return null;
-        } finally {
-            if (process != null) {
-                process.destroy();
-            }
-        }
-    }
-
-
-    private static String getWmicBuildNumber() {
-        var wmicCmdArray = new String[]{"wmic", "os", "get", "BuildNumber", "/value"};
-
-        Process process = null;
-        try {
-            process = new ProcessBuilder(wmicCmdArray).redirectErrorStream(true).start();
-            try (var source = Okio.buffer(Okio.source(process.getInputStream()))) {
-                String result = source.readUtf8().trim();
-
-                int exitCode = process.waitFor();
-                if (exitCode != 0) {
-                    MCEF.INSTANCE.getLogger().error("wmic command exit code: {}", exitCode);
-                }
-
-                if (result.isEmpty()) {
-                    result = null;
-                } else {
-                    result = result.substring("BuildNumber=".length());
-                }
-
-                return result;
-            }
-        } catch (IOException | InterruptedException e) {
-            MCEF.INSTANCE.getLogger().error("Failed to execute wmic command", e);
-            return null;
-        } finally {
-            if (process != null) {
-                process.destroy();
-            }
+            var major = osVersion.split("\\.")[0];
+            return Integer.parseInt(major) >= 10;
+        } catch (NumberFormatException | ArrayIndexOutOfBoundsException e) {
+            MCEF.INSTANCE.getLogger().warn("Could not parse Windows os.version; assuming compatible");
+            return true;
         }
     }
 
