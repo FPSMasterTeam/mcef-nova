@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.2 (unreleased)
+## 1.0.2 (2026-10-17)
 
 ### Changed
 - Zero-copy accelerated paint (`shared_texture_enabled`) is now only enabled when the CEF message
