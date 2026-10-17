@@ -194,9 +194,9 @@ public enum MCEF {
      *
      * <p>On Windows/Linux CEF runs on its own message-loop thread (see {@link
      * net.ccbluex.liquidbounce.mcef.cef.CefMessageLoopThread}); this only uploads the frames that
-     * thread has buffered. On macOS the render thread still IS the CEF thread, so this pumps the
-     * CEF message loop first (paints land in the CPU buffers synchronously) and uploads right
-     * after — same-frame delivery, exactly as before.
+     * thread has buffered. On macOS, and on Windows/Linux with {@code -Dmcef.pumpOnRenderThread=true}
+     * (required for zero-copy accelerated paint), the render thread IS the CEF thread, so this pumps
+     * the CEF message loop first (paints land synchronously) and uploads right after.
      */
     public void update() {
         if (!isInitialized()) {
