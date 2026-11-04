@@ -69,66 +69,34 @@ git submodule update --init --recursive java-cef
 ./gradlew build
 ```
 
-## Distribution (private, via GitHub Packages)
+## Distribution
 
-This library is **closed-source** and distributed as a private Maven artifact on GitHub Packages at
-`https://maven.pkg.github.com/FPSMasterTeam/mcef-nova` under the coordinate
-`com.github.FPSMasterTeam:mcef-nova:<version>`. Both publishing here and consuming it elsewhere
-require a GitHub token — GitHub Packages authenticates even for reads.
+This library is **open source (LGPL-2.1)**. It was previously published as a private artifact on
+GitHub Packages; that channel is retired and should not be relied on.
 
-### Personal Access Token (one-time)
+The supported ways to consume it are:
 
-1. Go to **GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic)** and
-   **Generate new token (classic)**.
-2. Select scopes:
-   - `read:packages` — to *consume* the artifact (what most developers need).
-   - `write:packages` — additionally, to *publish* from your machine.
-3. Copy the token (starts with `ghp_…`).
-
-### Configure your machine
-
-Add the credentials to your **global** Gradle properties (`~/.gradle/gradle.properties`) so they
-stay out of any repo:
-
-```properties
-gpr.user=<your-github-username>
-gpr.key=<your-ghp_-token>
-```
-
-Both this repo's `build.gradle` (publishing) and the host mod's `build.gradle.kts` (consuming) read
-`gpr.user` / `gpr.key`, falling back to the `GITHUB_ACTOR` / `GITHUB_TOKEN` environment variables
-that GitHub Actions injects automatically. So CI needs no manual token — only `packages: read`
-(consume) or `packages: write` (publish) permission in the workflow.
-
-### Publishing
-
-- **Release** (recommended for a real version): publish a GitHub Release; `.github/workflows/
-  maven-publish.yml` builds and publishes that `mod_version` to GitHub Packages.
-- **Snapshot**: a push to `master` publishes `<mod_version>-SNAPSHOT` via `maven-snapshot.yml`.
-- **Locally**: `./gradlew publish` (needs `gpr.*` with `write:packages`).
-
-Bump `mod_version` in `gradle.properties` for every change consumers must pick up — Maven caches a
-fixed version, so reusing one hides updates.
-
-### Consuming
-
-In the host project, add the repository (with the same credential fallback) and depend on the
-coordinate — see `FPSMaster-Nova/build.gradle.kts`:
+- **Vendored copy (what FPSMaster-Nova does).** Build the tag you need, then copy the jar, the sources
+  jar and the pom into the host repo under `vendor/maven/com/github/FPSMasterTeam/mcef-nova/<version>/`
+  and declare `maven { url = uri("${rootDir}/vendor/maven") }`. This needs no network access or
+  credentials and keeps working after this repository is archived.
+- **JitPack.** `maven("https://jitpack.io")` plus
+  `implementation("com.github.FPSMasterTeam:mcef-nova:<tag>")`. JitPack builds the tag on first use
+  (`jitpack.yml` pins JDK 21).
+- **Local iteration.** `./gradlew publishToMavenLocal` here, `mavenLocal()` in the host.
 
 ```kotlin
-repositories {
-    maven {
-        url = uri("https://maven.pkg.github.com/FPSMasterTeam/mcef-nova")
-        credentials {
-            username = (project.findProperty("gpr.user") as String?) ?: System.getenv("GITHUB_ACTOR")
-            password = (project.findProperty("gpr.key") as String?) ?: System.getenv("GITHUB_TOKEN")
-        }
-    }
-}
-dependencies { implementation("com.github.FPSMasterTeam:mcef-nova:1.0.1") }
+dependencies { implementation("com.github.FPSMasterTeam:mcef-nova:1.0.2") }
 ```
 
-For CI in a **different** repo to read this package, grant that repo access under
-**mcef-nova → Package settings → Manage Actions access → Add repository (Read)**, or use a PAT secret.
+### CEF native bundles
+
+At runtime mcef downloads the prebuilt CEF bundle that matches the pinned java-cef commit. The host
+chooses the mirror (see `MCEFHost`). The FPSMaster OSS mirror is being shut down along with the rest of
+the FPSMaster services. Mirror the bundles to the GitHub Releases of this repository, or rely on the
+upstream CCBlueX mirrors.
+
+Bump `mod_version` in `gradle.properties` for every change consumers must pick up. Maven caches a fixed
+version, so reusing a version number hides updates.
 
 Forked from CCBlueX/mcef (LGPL-2.1). See `LICENSE`.
