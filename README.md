@@ -1,7 +1,34 @@
 # mcef-nova
 
+> Archive notice: maintenance ends on `<停止维护日期>`. The final library version is **1.0.3**.
+> Obtain jar, sources and POM from the final host's
+> `vendor/maven/com/github/FPSMasterTeam/mcef-nova/1.0.3/`, or build this repository's `final/release`.
+> JitPack coordinates are `com.github.FPSMasterTeam:mcef-nova:<tag-or-commit>`.
+> No new tag was published during this work; do not assume a `1.0.3` JitPack build exists.
+
 A **Minecraft-version-agnostic** fork of [CCBlueX/mcef](https://github.com/CCBlueX/mcef)
-(Minecraft Chromium Embedded Framework), maintained for FPSMaster Nova.
+(Minecraft Chromium Embedded Framework), used by FPSMaster Nova.
+
+## Build, run and layout
+
+Use **JDK 21** to run Gradle; the library targets Java 17 bytecode:
+
+```bash
+./gradlew --no-daemon --max-workers=2 build test publishToMavenLocal
+./gradlew --offline --no-daemon --max-workers=2 build test
+```
+
+Offline builds require the wrapper and public Maven dependencies to be cached.
+This is a library, not a standalone application. A host supplies the window, render loop,
+LWJGL and other compile-only dependencies. Native CEF bundles are required separately at runtime.
+
+- `src/main/java/`: host SPI, CEF lifecycle/download and OpenGL renderer.
+- `java-cef/`: vendored Java bindings and their BSD notice.
+- `src/test/`: EGL attribute validation tests, not native GPU tests.
+- `docs/`: architecture, fork guide and release checklist; `build/libs/`: generated jars.
+
+See [architecture](docs/ARCHITECTURE.md), [forking](docs/FORKING.md),
+[known issues](KNOWN_ISSUES.md) and [changelog](CHANGELOG.md).
 
 ## What is different from upstream MCEF
 
@@ -11,7 +38,7 @@ Upstream MCEF ships a **separate artifact per Minecraft version** (`mcef:x.y.z-1
 
 This fork removes **all** of that coupling. The native layer — JCEF download/load, the Chromium
 process, platform detection, GPU-accelerated shared-texture import (Win D3D11 / Linux dmabuf) — is
-identical across Minecraft versions and is kept as-is. The only thing that used to be
+shared across Minecraft versions. The only thing that used to be
 version-specific, the renderer, has been reduced to its irreducible core: it lands CEF's pixels in a
 plain OpenGL texture (via raw LWJGL `GL`/`EGL` calls) and exposes a single value across the
 boundary:
