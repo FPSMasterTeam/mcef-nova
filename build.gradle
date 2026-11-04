@@ -47,6 +47,10 @@ sourceSets {
 }
 
 dependencies {
+    testImplementation "org.junit.jupiter:junit-jupiter:5.10.2"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+    testRuntimeOnly "org.lwjgl:lwjgl:${lwjglVersion}"
+    testRuntimeOnly "org.lwjgl:lwjgl-egl:${lwjglVersion}"
     // Runtime-provided by Minecraft's own LWJGL / SLF4J. compileOnly so we never bundle or pin them.
     compileOnly "org.lwjgl:lwjgl:${lwjglVersion}"
     compileOnly "org.lwjgl:lwjgl-opengl:${lwjglVersion}"
@@ -98,9 +102,20 @@ jar {
     from("LICENSE") {
         rename { "${it}_${project.base.archivesName.get()}" }
     }
+    from("java-cef/LICENSE.txt") { into "META-INF/licenses/java-cef" }
+    from("THIRD_PARTY_NOTICES.md") { into "META-INF" }
     from("$buildDir/jcef.commit")
     from sourceSets.jcef.output
 }
+
+tasks.matching { it.name == 'sourcesJar' }.configureEach {
+    from sourceSets.jcef.allSource
+    from("LICENSE") { into "META-INF/licenses/mcef-nova" }
+    from("java-cef/LICENSE.txt") { into "META-INF/licenses/java-cef" }
+    from("THIRD_PARTY_NOTICES.md") { into "META-INF" }
+}
+
+tasks.named('test') { useJUnitPlatform() }
 
 java {
     withSourcesJar()
@@ -119,21 +134,6 @@ publishing {
     publications {
         mavenJava(MavenPublication) {
             from components.java
-        }
-    }
-    repositories {
-        // Private distribution via GitHub Packages (the repo is closed-source). Consumers add the same
-        // URL as a Maven repo and authenticate with a token — see FPSMaster-Nova/build.gradle.kts.
-        maven {
-            name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/FPSMasterTeam/mcef-nova")
-            credentials {
-                // CI: the workflows inject the built-in GITHUB_ACTOR + GITHUB_TOKEN.
-                // Local publish: set gpr.user / gpr.key (a PAT with write:packages) in
-                // ~/.gradle/gradle.properties.
-                username = project.findProperty("gpr.user") ?: System.getenv("GITHUB_ACTOR")
-                password = project.findProperty("gpr.key") ?: System.getenv("GITHUB_TOKEN")
-            }
         }
     }
 }

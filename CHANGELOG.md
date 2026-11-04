@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3
+
+- Replace the GPL EGL helper with a new LGPL implementation based on public EGL/LWJGL APIs.
+- Cache capabilities per display and accept the NULL context/buffer required by dma-buf import.
+- Disable accelerated browser creation when capability detection or native linkage fails.
+- Include Java-CEF notices and matching Java binding sources in distributable jars.
+- Retire GitHub Packages publishing; document vendored/offline integration and Linux limitations.
+
 ## 1.0.2 (2026-10-17)
 
 ### Changed

@@ -22,6 +22,7 @@
 package net.ccbluex.liquidbounce.mcef.cef;
 
 import org.cef.CefBrowserSettings;
+import net.ccbluex.liquidbounce.mcef.MCEFAccelerationSupport;
 
 public class MCEFBrowserSettings extends CefBrowserSettings {
     public MCEFBrowserSettings(int frameRate, boolean sharedTextureEnabled) {
@@ -38,6 +39,7 @@ public class MCEFBrowserSettings extends CefBrowserSettings {
         // texture-release theories all ruled out). So zero copy is gated to the render-thread pump and
         // browsers on the dedicated-thread setup fall back to the CPU onPaint path.
         boolean canZeroCopy = CefHelper.getMessageLoopThread() == null;
-        this.shared_texture_enabled = sharedTextureEnabled && canZeroCopy;
+        this.shared_texture_enabled = sharedTextureEnabled && canZeroCopy
+                && MCEFAccelerationSupport.getAccelerationSupport().isSupported();
     }
 }

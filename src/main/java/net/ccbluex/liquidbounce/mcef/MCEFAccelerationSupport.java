@@ -93,7 +93,7 @@ public final class MCEFAccelerationSupport {
             }
 
             return new Support(true, !isNvidiaGpu);
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
             MCEF.INSTANCE.LOGGER.warn("Failed to check GPU acceleration support: {}", e.getMessage());
             return Support.UNSUPPORTED;
         }
@@ -135,7 +135,7 @@ public final class MCEFAccelerationSupport {
             }
 
             return new Support(true, false);
-        } catch (Exception e) {
+        } catch (Exception | LinkageError e) {
             MCEF.INSTANCE.LOGGER.warn("Failed to check Linux GPU acceleration support: {}", e.getMessage());
             return Support.UNSUPPORTED;
         }

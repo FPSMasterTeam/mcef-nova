@@ -65,8 +65,8 @@ if (r.isTextureReady() && !r.isUnpainted()) {
 ## Building
 
 ```
-git submodule update --init --recursive java-cef
-./gradlew build
+# JDK 21; produces Java 17 bytecode. java-cef sources are already vendored.
+./gradlew build test publishToMavenLocal
 ```
 
 ## Distribution
@@ -86,15 +86,34 @@ The supported ways to consume it are:
 - **Local iteration.** `./gradlew publishToMavenLocal` here, `mavenLocal()` in the host.
 
 ```kotlin
-dependencies { implementation("com.github.FPSMasterTeam:mcef-nova:1.0.2") }
+dependencies { implementation("com.github.FPSMasterTeam:mcef-nova:1.0.3") }
 ```
 
 ### CEF native bundles
 
-At runtime mcef downloads the prebuilt CEF bundle that matches the pinned java-cef commit. The host
-chooses the mirror (see `MCEFHost`). The FPSMaster OSS mirror is being shut down along with the rest of
-the FPSMaster services. Mirror the bundles to the GitHub Releases of this repository, or rely on the
-upstream CCBlueX mirrors.
+At runtime mcef downloads the prebuilt CEF bundle matching the pinned java-cef commit.
+Defaults are the public LiquidBounce and CCBlueX resource mirrors in `MCEFSettings`;
+there is no FPSMaster download source. Fully offline first launches still require a separately
+provided native bundle. No native release assets are published by this build.
+
+### EGL provenance and Linux limitations
+
+Version 1.0.3 replaces the former GPL LiquidBounce EGL helper with a new LGPL-2.1-or-later
+implementation based on the public EGL / LWJGL APIs. It caches capabilities per display and uses
+public LWJGL JNI dispatch for the NULL context/buffer required by dma-buf import. See
+`THIRD_PARTY_NOTICES.md` for references. Both jars include Java-CEF's BSD license; the source jar
+also includes its Java bindings.
+
+Linux hardware acceleration has **not been verified on a real Linux machine**. If initialization
+or capability detection fails (including missing native EGL linkage), browser settings disable
+shared textures and CEF uses software `onPaint` rendering. `WEBKIT_DISABLE_DMABUF_RENDERER=1` also
+forces that software path. This is a creation-time fallback, not live recovery: if an already
+accelerated browser later fails to import a dma-buf frame, it cannot switch itself to software.
+The host must recreate that browser with shared textures disabled. Automatic runtime recreation
+is not implemented. macOS and Windows do not call the Linux EGL helper.
+
+After downloading build dependencies, `./gradlew --offline build test` reuses those caches.
+A clean machine still needs the public Gradle/Maven dependencies on its first build.
 
 Bump `mod_version` in `gradle.properties` for every change consumers must pick up. Maven caches a fixed
 version, so reusing a version number hides updates.

@@ -1,96 +1,82 @@
 package net.ccbluex.liquidbounce.mcef.utils;
 
-import net.ccbluex.liquidbounce.mcef.MCEF;
-import org.jspecify.annotations.NullMarked;
-import org.jspecify.annotations.Nullable;
 import org.lwjgl.egl.EGL;
 import org.lwjgl.egl.EGL14;
 import org.lwjgl.egl.EGLCapabilities;
+import org.lwjgl.egl.EXTImageDMABufImport;
 import org.lwjgl.egl.KHRImageBase;
 import org.lwjgl.system.JNI;
-import org.lwjgl.system.MemoryStack;
 import org.lwjgl.system.MemoryUtil;
 
 import java.nio.IntBuffer;
+import java.util.HashMap;
+import java.util.Map;
 
-/*
- * This file is part of LiquidBounce (https://github.com/CCBlueX/LiquidBounce)
+/**
+ * EGL adapter implemented for mcef-nova from the EGL and LWJGL public APIs.
+ * Copyright (C) 2026 FPSMaster Team. SPDX-License-Identifier: LGPL-2.1-or-later
  *
- * Copyright (c) 2026 CCBlueX
- *
- * LiquidBounce is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * LiquidBounce is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with LiquidBounce. If not, see <https://www.gnu.org/licenses/>.
- *
+ * <p>Displays belong to the host window system: this class never terminates them or destroys EGL.
+ * Call on a thread with the host's graphics context current.
  */
-@NullMarked
-public class EglUtils {
+public final class EglUtils {
+    private static final Map<Long, EGLCapabilities> displays = new HashMap<>();
 
-    private static @Nullable EGLCapabilities eglCapabilities = null;
-    private static long eglDisplay = EGL14.EGL_NO_DISPLAY;
-
-    public static long getDisplay() {
-        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
-            return eglDisplay;
-        }
-
-        long display = EGL14.eglGetCurrentDisplay();
-        if (display == EGL14.EGL_NO_DISPLAY) {
-            display = EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
-        }
-
-        if (display == EGL14.EGL_NO_DISPLAY) {
-            return EGL14.EGL_NO_DISPLAY;
-        }
-
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            IntBuffer major = stack.mallocInt(1);
-            IntBuffer minor = stack.mallocInt(1);
-            if (!EGL14.eglInitialize(display, major, minor)) {
-                MCEF.INSTANCE.LOGGER.error("eglInitialize failed for EGL display.");
-                return EGL14.EGL_NO_DISPLAY;
-            }
-        }
-
-        eglDisplay = display;
-
-        try {
-            EGL.getCapabilities();
-        } catch (IllegalStateException ignored) {
-            EGL.create();
-        }
-        eglCapabilities = EGL.createDisplayCapabilities(display);
-
-        return eglDisplay;
+    private EglUtils() {
     }
 
-    public static EGLCapabilities getCapabilities() {
-        if (eglCapabilities == null) {
-            return EGL.getCapabilities();
+    /** Returns an initialized display, or EGL_NO_DISPLAY when the driver cannot initialize one. */
+    public static synchronized long getDisplay() {
+        // EGL may be configured for explicit initialization. Load it before any native EGL call.
+        try {
+            EGL.getCapabilities();
+        } catch (IllegalStateException notLoaded) {
+            EGL.create();
         }
-        return eglCapabilities;
+        long current = EGL14.eglGetCurrentDisplay();
+        long candidate = current != EGL14.EGL_NO_DISPLAY
+                ? current : EGL14.eglGetDisplay(EGL14.EGL_DEFAULT_DISPLAY);
+        if (candidate == EGL14.EGL_NO_DISPLAY) return candidate;
+        if (!displays.containsKey(candidate)) {
+            if (!EGL14.eglInitialize(candidate, (IntBuffer) null, (IntBuffer) null)) {
+                return EGL14.EGL_NO_DISPLAY;
+            }
+            // Publish only a complete display/capability pair; never reuse another display's flags.
+            displays.put(candidate, EGL.createDisplayCapabilities(candidate));
+        }
+        return candidate;
+    }
+
+    public static synchronized EGLCapabilities getCapabilities() {
+        long display = getDisplay();
+        EGLCapabilities capabilities = displays.get(display);
+        if (capabilities == null) {
+            throw new IllegalStateException("No initialized EGL display is available");
+        }
+        return capabilities;
     }
 
     /**
-     * A copy of [{@link KHRImageBase#eglCreateImageKHR}] to bypass argument checks.
+     * Imports an EGL image. EXT_image_dma_buf_import requires both EGL_NO_CONTEXT and a NULL
+     * EGLClientBuffer; its plane descriptors are passed exclusively in the attribute list.
      */
-    public static long eglCreateImageKHR(long display, long context, int target, long buffer, IntBuffer attribs) {
-        long functionAddress = EGL.getCapabilities().eglCreateImageKHR;
-        if (functionAddress == 0L) {
-            MCEF.INSTANCE.LOGGER.error("eglCreateImageKHR is not available on this EGL implementation.");
-            return 0L;
+    public static long eglCreateImageKHR(long display, long context, int target, long buffer, IntBuffer attributes) {
+        validateAttributes(attributes);
+        if (display == EGL14.EGL_NO_DISPLAY) return KHRImageBase.EGL_NO_IMAGE_KHR;
+        if (target == EXTImageDMABufImport.EGL_LINUX_DMA_BUF_EXT
+                && (context != EGL14.EGL_NO_CONTEXT || buffer != 0L)) {
+            throw new IllegalArgumentException("dma-buf import requires EGL_NO_CONTEXT and a NULL buffer");
         }
-
-        return JNI.callPPPPP(display, context, target, buffer, MemoryUtil.memAddress(attribs), functionAddress);
+        if (EGL.getCapabilities().eglCreateImageKHR == 0L) return KHRImageBase.EGL_NO_IMAGE_KHR;
+        // LWJGL's EGL wrapper rejects NULL context/buffer even though dma-buf requires both.
+        return JNI.callPPPPP(display, context, target, buffer, MemoryUtil.memAddress(attributes),
+                EGL.getCapabilities().eglCreateImageKHR);
     }
 
+    static void validateAttributes(IntBuffer attributes) {
+        if (!attributes.isDirect() || attributes.remaining() == 0 || attributes.remaining() % 2 != 1
+                || attributes.get(attributes.limit() - 1) != EGL14.EGL_NONE) {
+            throw new IllegalArgumentException("EGL attributes must be direct key/value pairs terminated by EGL_NONE");
+        }
+    }
 }

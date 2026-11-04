@@ -1,4 +1,4 @@
-name: Maven Snapshot
+name: Build
 
 on:
   push:
@@ -8,7 +8,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   snapshot:
@@ -29,12 +28,4 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build with Gradle
-        run: ./gradlew build
-
-      - name: Publish Snapshot to GitHub Packages
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION=$(grep "^mod_version=" gradle.properties | cut -d'=' -f2)
-          ./gradlew publish -Pmod_version="${VERSION}-SNAPSHOT"
+        run: ./gradlew build test
