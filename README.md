@@ -1,6 +1,6 @@
 # mcef-nova
 
-> Archive notice: maintenance ends on `<停止维护日期>`. The final library version is **1.0.3**.
+> Archive notice: maintenance ends on 2026-12-31. The final library version is **1.0.3**.
 > Obtain jar, sources and POM from the final host's
 > `vendor/maven/com/github/FPSMasterTeam/mcef-nova/1.0.3/`, or build this repository's `final/release`.
 > JitPack coordinates are `com.github.FPSMasterTeam:mcef-nova:<tag-or-commit>`.

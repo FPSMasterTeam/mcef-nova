@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.3 (final; maintenance ends on `<停止维护日期>`)
+## 1.0.3 (final; maintenance ends on 2026-12-31)
 
 - Replace the GPL EGL helper with a new LGPL implementation based on public EGL/LWJGL APIs.
 - Cache capabilities per display and accept the NULL context/buffer required by dma-buf import.

@@ -1,6 +1,6 @@
 # Known issues in the final version
 
-Final library version: 1.0.3. Maintenance ends on `<停止维护日期>`.
+Final library version: 1.0.3. Maintenance ends on 2026-12-31.
 
 - Linux EGL/dma-buf acceleration has not been tested on real Linux hardware in this work.
   Tests validate attribute buffers, not drivers, context sharing or frame import.
